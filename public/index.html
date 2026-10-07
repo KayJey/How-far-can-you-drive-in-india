@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How far can you drive in 8 hours? India</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<style>
+  :root { --bg:#121212; --fg:#f2efe6; --muted:#a8a69d; --panel:#1d1d1d; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display:flex; flex-direction:column; height:100%; max-width:1200px; margin:0 auto; padding:16px; gap:12px; }
+  h1 { font-family: Georgia, "Times New Roman", serif; font-weight:400; font-size:clamp(24px,4vw,40px); margin:0; }
+  .sub { color:var(--muted); font-size:14px; margin-top:4px; }
+  .tabs { display:flex; gap:8px; flex-wrap:wrap; }
+  .tabs button { background:var(--panel); color:var(--fg); border:1px solid #333; border-radius:8px; padding:8px 14px; font-size:14px; cursor:pointer; }
+  .tabs button[aria-pressed="true"] { background:var(--fg); color:#111; border-color:var(--fg); }
+  #mapwrap { position:relative; flex:1; min-height:360px; border-radius:14px; overflow:hidden; }
+  #map, #overlay { position:absolute; inset:0; width:100%; height:100%; }
+  #overlay { pointer-events:none; }
+  #label { position:absolute; right:14px; bottom:34px; background:#1d1d1df0; color:#fff; font-weight:700; font-size:clamp(20px,4vw,36px); padding:8px 20px; border-radius:10px; }
+  #tip { position:absolute; left:14px; top:14px; background:#1d1d1def; color:#fff; font-size:13px; padding:6px 10px; border-radius:8px; pointer-events:none; }
+  .legend { display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+  .ramp { flex:1; min-width:260px; }
+  .ramp .bar { height:14px; border-radius:7px; }
+  .ramp .ticks { display:flex; justify-content:space-between; font-size:13px; color:var(--fg); margin-top:4px; }
+  .ctrl { display:flex; align-items:center; gap:10px; font-size:14px; color:var(--muted); }
+  .ctrl input { width:180px; }
+  #scale { font-size:13px; color:var(--fg); }
+  #scale i { display:inline-block; height:8px; border:2px solid var(--fg); border-top:0; vertical-align:middle; margin-left:8px; }
+  .foot { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div>
+    <h1>How far can you drive in 8 hours?</h1>
+    <div class="sub" id="sub">India's biggest cities. Every road is coloured by the time it takes to reach it.</div>
+  </div>
+  <div class="tabs" id="tabs"></div>
+  <div id="mapwrap">
+    <div id="map"></div>
+    <canvas id="overlay"></canvas>
+    <div id="tip">Loading…</div>
+    <div id="label"></div>
+  </div>
+  <div class="legend">
+    <div class="ramp"><div class="bar" id="bar"></div><div class="ticks" id="ticks"></div></div>
+    <div class="ctrl">Show up to <input id="hours" type="range" min="1" max="8" step="0.5" value="8"><b id="hv">8h</b></div>
+    <div id="scale"></div>
+  </div>
+  <div class="foot" id="foot"></div>
+</div>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+const CITIES = {
+  bengaluru: { name: 'Bengaluru', ramp: ['#a6f04a', '#2fbf6a', '#0b5d2c'] },
+  delhi:     { name: 'Delhi',     ramp: ['#ffe14a', '#ff8a1f', '#8c2a0a'] },
+  mumbai:    { name: 'Mumbai',    ramp: ['#2ed3e6', '#2f6ff0', '#1a1f6b'] },
+  kolkata:   { name: 'Kolkata',   ramp: ['#f2a2ff', '#b24ae0', '#4a1070'] },
+};
+const NBUCKET = 64;
+let data = null, meta = null, cityKey = null, maxH = 8, colors = [];
+let hover = null;
+
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const tip = document.getElementById('tip');
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: 'https://tiles.openfreemap.org/styles/positron',
+  center: [78.5, 21], zoom: 4, attributionControl: { compact: true },
+  dragRotate: false, pitchWithRotate: false, touchPitch: false,
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+map.touchZoomRotate.disableRotation();
+
+function hex(h) { return [1,3,5].map(i => parseInt(h.slice(i, i+2), 16)); }
+function lerp(a, b, t) { return a.map((v, i) => Math.round(v + (b[i]-v) * t)); }
+function makeColors(ramp) {
+  const [a, b, c] = ramp.map(hex);
+  return Array.from({ length: NBUCKET }, (_, i) => {
+    const t = i / (NBUCKET - 1);
+    const rgb = t < .5 ? lerp(a, b, t*2) : lerp(b, c, (t-.5)*2);
+    return `rgb(${rgb})`;
+  });
+}
+
+function resize() {
+  const r = canvas.getBoundingClientRect(), d = devicePixelRatio || 1;
+  canvas.width = r.width * d; canvas.height = r.height * d;
+  draw();
+}
+
+let raf = 0;
+function draw() { cancelAnimationFrame(raf); raf = requestAnimationFrame(drawNow); }
+
+function drawNow() {
+  const d = devicePixelRatio || 1;
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!data) return;
+  const { n, off, t, xy } = data;
+  const W = canvas.width / d, H = canvas.height / d;
+  const z = map.getZoom();
+  ctx.lineWidth = Math.max(0.9, Math.min(2.4, 0.6 + (z - 4) * 0.3));
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.globalAlpha = 0.9;
+
+  // Edges are stored as normalised Web-Mercator coords, so projecting is plain arithmetic.
+  const paths = Array.from({ length: NBUCKET }, () => new Path2D());
+  const tmax = maxH * 3600, minPx = 0.6, pad = 20;
+  const c = map.getCenter(), scale = 512 * Math.pow(2, z);
+  const cx = mx(c.lng), cy = my(c.lat);
+  const ox = W / 2 - cx * scale, oy = H / 2 - cy * scale;
+  const { wx, wy } = data;
+  for (let i = 0; i < n; i++) {
+    const ti = t[i];
+    if (ti > tmax) continue;
+    const s0 = off[i], e0 = off[i+1];
+    const x0 = wx[s0] * scale + ox, y0 = wy[s0] * scale + oy;
+    const x1 = wx[e0-1] * scale + ox, y1 = wy[e0-1] * scale + oy;
+    if ((x0 < -pad && x1 < -pad) || (x0 > W+pad && x1 > W+pad) || (y0 < -pad && y1 < -pad) || (y0 > H+pad && y1 > H+pad)) continue;
+    const b = Math.min(NBUCKET - 1, (ti / 28800 * NBUCKET) | 0);
+    const path = paths[b];
+    path.moveTo(x0, y0);
+    for (let k = s0 + 1; k < e0; k++) path.lineTo(wx[k] * scale + ox, wy[k] * scale + oy);
+  }
+  for (let b = 0; b < NBUCKET; b++) { ctx.strokeStyle = colors[b]; ctx.stroke(paths[b]); }
+  ctx.globalAlpha = 1;
+  if (meta) {
+    const px = mx(meta.origin[0]) * scale + ox, py = my(meta.origin[1]) * scale + oy;
+    ctx.beginPath(); ctx.arc(px, py, 6, 0, 7); ctx.fillStyle = colors[0]; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#111'; ctx.stroke();
+  }
+  updateScale();
+}
+
+function mx(lon) { return (lon + 180) / 360; }
+function my(lat) { const r = lat * Math.PI / 180; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2; }
+
+function updateScale() {
+  const c = map.getCenter();
+  const mpp = 156543.03392 * Math.cos(c.lat * Math.PI / 180) / Math.pow(2, map.getZoom());
+  const km = [1,2,5,10,20,50,100,200,300,500].find(k => k * 1000 / mpp > 60) || 500;
+  const px = km * 1000 / mpp;
+  document.getElementById('scale').innerHTML = `${km} km<i style="width:${px}px"></i>`;
+}
+
+async function load(key) {
+  cityKey = key;
+  const c = CITIES[key];
+  document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-pressed', b.dataset.k === key));
+  document.getElementById('label').textContent = c.name;
+  tip.style.display = 'block'; tip.textContent = 'Loading ' + c.name + '…';
+  colors = makeColors(c.ramp);
+  document.getElementById('bar').style.background = `linear-gradient(90deg, ${c.ramp.join(',')})`;
+  document.getElementById('ticks').innerHTML = Array.from({length: 9}, (_, i) => `<span>${i ? i + 'h' : '0'}</span>`).join('');
+  data = null; draw();
+  try {
+    meta = await (await fetch(`data/${key}.json`)).json();
+    const buf = await (await fetch(`data/${key}.bin`)).arrayBuffer();
+    const hdr = new Uint32Array(buf, 0, 2), n = hdr[0], npts = hdr[1];
+    let o = 8;
+    const off = new Uint32Array(buf, o, n + 1); o += (n + 1) * 4;
+    const t = new Float32Array(buf, o, n); o += n * 4;
+    const xy = new Float32Array(buf, o, npts * 2);
+    const wx = new Float64Array(npts), wy = new Float64Array(npts);
+    for (let k = 0; k < npts; k++) { wx[k] = mx(xy[2*k]); wy[k] = my(xy[2*k+1]); }
+    data = { n, off, t, wx, wy };
+    document.getElementById('foot').textContent =
+      `Drive times: OpenStreetMap + Valhalla at ${Math.round(meta.speedFactor * 100)}% of typical road speeds, no traffic · ${n.toLocaleString()} road segments · Basemap: OpenFreeMap, © OpenStreetMap`;
+    tip.style.display = 'none';
+    map.jumpTo({ center: meta.view.center, zoom: meta.view.zoom });
+    draw();
+  } catch (e) {
+    tip.textContent = location.protocol === 'file:'
+      ? 'Open this page through a web server (for example http://localhost:8810), not as a file.'
+      : 'No data for ' + c.name + ' yet — the exporter has not produced it.';
+    console.error(e);
+  }
+}
+
+const tabs = document.getElementById('tabs');
+for (const [k, c] of Object.entries(CITIES)) {
+  const b = document.createElement('button');
+  b.textContent = c.name; b.dataset.k = k;
+  b.onclick = () => { history.replaceState(null, '', '?city=' + k); load(k); };
+  tabs.appendChild(b);
+}
+document.getElementById('hours').oninput = e => {
+  maxH = +e.target.value; document.getElementById('hv').textContent = maxH + 'h'; draw();
+};
+map.on('move', draw);
+addEventListener('resize', resize);
+map.on('error', e => console.warn('basemap:', e && e.error && e.error.message));
+resize();
+const q = new URLSearchParams(location.search).get('city');
+load(q in CITIES ? q : 'bengaluru');
+</script>
+</body>
+</html>

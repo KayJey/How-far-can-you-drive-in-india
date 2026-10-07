@@ -1,0 +1,9 @@
+# Track only the map app; everything else in this folder belongs to other projects.
+/*
+!/.gitignore
+!/README.md
+!/.github/
+!/public/
+!/scripts/
+/scripts/*
+!/scripts/export.mjs
