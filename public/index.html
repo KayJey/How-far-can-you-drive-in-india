@@ -16,10 +16,13 @@
   .tabs button { background:var(--panel); color:var(--fg); border:1px solid #333; border-radius:8px; padding:8px 14px; font-size:14px; cursor:pointer; }
   .tabs button[aria-pressed="true"] { background:var(--fg); color:#111; border-color:var(--fg); }
   #mapwrap { position:relative; flex:1; min-height:360px; border-radius:14px; overflow:hidden; }
-  #map, #overlay { position:absolute; inset:0; width:100%; height:100%; }
-  #overlay { pointer-events:none; }
-  #label { position:absolute; right:14px; bottom:34px; background:#1d1d1df0; color:#fff; font-weight:700; font-size:clamp(20px,4vw,36px); padding:8px 20px; border-radius:10px; }
-  #tip { position:absolute; left:14px; top:14px; background:#1d1d1def; color:#fff; font-size:13px; padding:6px 10px; border-radius:8px; pointer-events:none; }
+  #mapBase, #overlay, #map { position:absolute; inset:0; width:100%; height:100%; }
+  #mapBase { z-index:1; pointer-events:none; }
+  #overlay { z-index:2; pointer-events:none; }
+  #map { z-index:3; background:transparent; }
+  #hov { position:absolute; z-index:5; display:none; background:#1d1d1def; color:#fff; font-size:13px; padding:5px 9px; border-radius:7px; pointer-events:none; white-space:nowrap; }
+  #label { z-index:4; position:absolute; right:14px; bottom:34px; background:#1d1d1df0; color:#fff; font-weight:700; font-size:clamp(20px,4vw,36px); padding:8px 20px; border-radius:10px; }
+  #tip { z-index:4; position:absolute; left:14px; top:14px; background:#1d1d1def; color:#fff; font-size:13px; padding:6px 10px; border-radius:8px; pointer-events:none; }
   .legend { display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
   .ramp { flex:1; min-width:260px; }
   .ramp .bar { height:14px; border-radius:7px; }
@@ -39,8 +42,10 @@
   </div>
   <div class="tabs" id="tabs"></div>
   <div id="mapwrap">
-    <div id="map"></div>
+    <div id="mapBase"></div>
     <canvas id="overlay"></canvas>
+    <div id="map"></div>
+    <div id="hov"></div>
     <div id="tip">Loading…</div>
     <div id="label"></div>
   </div>
@@ -67,14 +72,34 @@ const canvas = document.getElementById('overlay');
 const ctx = canvas.getContext('2d');
 const tip = document.getElementById('tip');
 
-const map = new maplibregl.Map({
-  container: 'map',
-  style: 'https://tiles.openfreemap.org/styles/positron',
-  center: [78.5, 21], zoom: 4, attributionControl: { compact: true },
-  dragRotate: false, pitchWithRotate: false, touchPitch: false,
-});
+const STYLE = 'https://tiles.openfreemap.org/styles/positron';
+const VIEW = { center: [78.5, 21], zoom: 4, dragRotate: false, pitchWithRotate: false, touchPitch: false };
+
+// Bottom map: basemap without any text. Top map: text only. The road canvas sits between them,
+// so place names and road names read on top of the coloured roads.
+const baseMap = new maplibregl.Map({ container: 'mapBase', style: STYLE, ...VIEW, interactive: false, attributionControl: false });
+const map = new maplibregl.Map({ container: 'map', style: STYLE, ...VIEW, attributionControl: { compact: true } });
 map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
 map.touchZoomRotate.disableRotation();
+
+baseMap.on('load', () => {
+  for (const l of baseMap.getStyle().layers) if (l.type === 'symbol') baseMap.setLayoutProperty(l.id, 'visibility', 'none');
+});
+// show more names earlier: villages, towns, minor places, road names and highway (NH/SH) shields
+const EARLIER = { label_village: 7.5, label_other: 7, label_town: 5, 'highway-name-major': 9.5,
+  'highway-shield-non-us': 8.5, 'highway-shield-us-interstate': 8.5, road_shield_us: 9, 'highway-name-minor': 12.5, 'highway-name-path': 14 };
+map.on('load', () => {
+  for (const l of map.getStyle().layers) {
+    if (l.type !== 'symbol') { map.setLayoutProperty(l.id, 'visibility', 'none'); continue; }
+    if (EARLIER[l.id] != null) map.setLayerZoomRange(l.id, EARLIER[l.id], 24);
+    if (/^label_|^highway-name/.test(l.id)) {
+      map.setPaintProperty(l.id, 'text-halo-color', 'rgba(255,255,255,0.92)');
+      map.setPaintProperty(l.id, 'text-halo-width', 1.8);
+      map.setPaintProperty(l.id, 'text-color', '#111');
+    }
+  }
+});
+map.on('move', () => baseMap.jumpTo({ center: map.getCenter(), zoom: map.getZoom() }));
 
 function hex(h) { return [1,3,5].map(i => parseInt(h.slice(i, i+2), 16)); }
 function lerp(a, b, t) { return a.map((v, i) => Math.round(v + (b[i]-v) * t)); }
@@ -193,6 +218,36 @@ document.getElementById('hours').oninput = e => {
   maxH = +e.target.value; document.getElementById('hv').textContent = maxH + 'h'; draw();
 };
 map.on('move', draw);
+// hover: arrival time of the nearest road under the cursor
+const hov = document.getElementById('hov');
+let hoverEvt = null, hoverRaf = 0;
+map.on('mousemove', e => { hoverEvt = e; if (!hoverRaf) hoverRaf = requestAnimationFrame(doHover); });
+map.on('mouseout', () => { hov.style.display = 'none'; });
+map.on('movestart', () => { hov.style.display = 'none'; });
+function doHover() {
+  hoverRaf = 0;
+  if (!data || !hoverEvt) return;
+  const { n, off, t, wx, wy } = data;
+  const z = map.getZoom(), scale = 512 * Math.pow(2, z), c = map.getCenter();
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  const ox = W / 2 - mx(c.lng) * scale, oy = H / 2 - my(c.lat) * scale;
+  const mxp = hoverEvt.point.x, myp = hoverEvt.point.y, tmax = maxH * 3600;
+  let best = 100, bt = -1;
+  for (let i = 0; i < n; i++) {
+    if (t[i] > tmax) continue;
+    const k = off[i];
+    const dx = wx[k] * scale + ox - mxp; if (dx > 10 || dx < -10) continue;
+    const dy = wy[k] * scale + oy - myp; if (dy > 10 || dy < -10) continue;
+    const d = dx * dx + dy * dy;
+    if (d < best) { best = d; bt = t[i]; }
+  }
+  if (bt < 0 || best > 64) { hov.style.display = 'none'; return; }
+  const m = Math.round(bt / 60);
+  hov.textContent = `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m from ${CITIES[cityKey].name}`;
+  hov.style.left = (hoverEvt.point.x + 14) + 'px'; hov.style.top = (hoverEvt.point.y + 14) + 'px';
+  hov.style.display = 'block';
+}
+
 addEventListener('resize', resize);
 map.on('error', e => console.warn('basemap:', e && e.error && e.error.message));
 resize();
