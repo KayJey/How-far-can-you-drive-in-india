@@ -4,6 +4,7 @@
 !/README.md
 !/.github/
 !/public/
+!/docs/
 !/scripts/
 /scripts/*
 !/scripts/export.mjs

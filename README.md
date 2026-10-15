@@ -3,6 +3,14 @@
 Interactive map: every road reachable by car from a city within 8 hours, coloured by travel time.
 Inspired by the OneMoreRoad.com maps. Live site: https://kayjey.github.io/How-far-can-you-drive-in-india/
 
+## Screenshots
+
+| Bengaluru | Delhi | Mumbai |
+|---|---|---|
+| [![Bengaluru](docs/screenshots/bengaluru.png)](docs/screenshots/bengaluru.png) | [![Delhi](docs/screenshots/delhi.png)](docs/screenshots/delhi.png) | [![Mumbai](docs/screenshots/mumbai.png)](docs/screenshots/mumbai.png) |
+
+Every road is coloured by how long it takes to reach it by car (light = close, dark = about 8 hours). Same scale on every map.
+
 ## How it works
 - Road data: OpenStreetMap (Geofabrik India extracts), filtered to motorway/trunk/primary/secondary/tertiary/unclassified.
 - Drive times: [Valhalla](https://github.com/valhalla/valhalla) `/expansion` from the city centre, 8h budget.
